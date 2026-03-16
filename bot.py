@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bot de Telegram Plantilla
+Bot de Telegram Plantilla - Versión Corregida para Render
 """
 
 import os
@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuración del bot
+# Configuración
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
 PORT = int(os.environ.get('PORT', 8080))
@@ -27,80 +27,112 @@ if not TOKEN:
     logger.error("No se encontró TELEGRAM_BOT_TOKEN")
     sys.exit(1)
 
+# Inicializar Flask y Bot
 app = Flask(__name__)
 bot = Bot(token=TOKEN)
+
+# Inicializar Application (se configurará después)
 application = None
 
+# --- COMANDOS DEL BOT ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f"¡Hola {user.first_name}! 👋\n"
-        f"Soy un bot plantilla funcionando correctamente.\n"
+        f"Bot funcionando correctamente en Render.\n"
         f"Comandos: /start, /help, /info"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Ayuda del Bot\n\n"
-        "Este es un bot plantilla que puedes personalizar."
+        "Este bot está desplegado en Render 24/7.\n"
+        "Usa /info para ver el estado."
     )
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 Información:\n"
-        f"• Estado: 🟢 Activo\n"
-        f"• Modo: {'Webhook' if WEBHOOK_URL else 'Polling'}\n"
+        f"• Estado: 🟢 Activo en Render\n"
+        f"• Modo: Webhook\n"
         f"• Versión: 1.0"
     )
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Recibí: {update.message.text}")
 
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    if request.method == 'POST':
-        update = Update.de_json(request.get_json(force=True), bot)
-        asyncio.run_coroutine_threadsafe(
-            application.process_update(update), 
-            application.loop
-        )
-        return 'OK', 200
-    return 'Method not allowed', 405
-
-@app.route('/')
-def index():
-    return "<h1>🤖 Bot de Telegram Activo</h1><p>El bot está funcionando correctamente.</p>"
-
+# --- CONFIGURACIÓN DE LA APLICACIÓN ---
 def setup_application():
     global application
     application = Application.builder().token(TOKEN).build()
+    
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    
     return application
 
-def run_polling():
-    logger.info("Iniciando bot en modo polling...")
-    app_polling = setup_application()
-    app_polling.run_polling(allowed_updates=Update.ALL_TYPES)
+# --- RUTAS DE FLASK ---
+@app.route('/')
+def index():
+    return """
+    <html>
+        <head><title>Bot de Telegram</title></head>
+        <body>
+            <h1>🤖 Bot de Telegram Activo en Render</h1>
+            <p>El bot está funcionando correctamente.</p>
+            <p>Webhook configurado: {}<p>
+        </body>
+    </html>
+    """.format("Sí" if WEBHOOK_URL else "No")
 
-def run_webhook():
-    global application
-    logger.info(f"Iniciando bot en modo webhook en puerto {PORT}...")
-    application = setup_application()
-    asyncio.run(application.initialize())
-    asyncio.run(application.start())
-    webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-    asyncio.run(bot.set_webhook(url=webhook_url))
-    logger.info(f"Webhook configurado: {webhook_url}")
-    app.run(host='0.0.0.0', port=PORT)
+@app.route('/health')
+def health():
+    return 'OK', 200
 
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """Endpoint principal para Telegram"""
+    if request.method == 'POST':
+        try:
+            update = Update.de_json(request.get_json(force=True), bot)
+            # Procesar update de manera asíncrona
+            asyncio.run_coroutine_threadsafe(
+                application.process_update(update), 
+                application.loop
+            )
+            return 'OK', 200
+        except Exception as e:
+            logger.error(f"Error procesando update: {e}")
+            return 'Error', 500
+    return 'Method not allowed', 405
+
+# --- FUNCIÓN PRINCIPAL ---
 def main():
+    """Punto de entrada"""
+    global application
+    
+    # Configurar aplicación
+    application = setup_application()
+    
+    # Inicializar aplicación (crea el loop)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    
+    # Configurar webhook si tenemos WEBHOOK_URL
     if WEBHOOK_URL:
-        run_webhook()
+        webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+        loop.run_until_complete(bot.set_webhook(url=webhook_url))
+        logger.info(f"✅ Webhook configurado en: {webhook_url}")
     else:
-        run_polling()
+        logger.warning("⚠️ WEBHOOK_URL no configurada, el bot no recibirá mensajes")
+    
+    # Ejecutar Flask
+    app.run(host='0.0.0.0', port=PORT)
 
 if __name__ == '__main__':
     main()
