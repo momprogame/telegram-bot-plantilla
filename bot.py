@@ -1,138 +1,123 @@
-#!/usr/bin/env python3
-"""
-Bot de Telegram Plantilla - Versión Corregida para Render
-"""
-
 import os
 import logging
 import sys
-from flask import Flask, request
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from flask import Flask, request, jsonify
+import telegram
 import asyncio
 
-# Configurar logging
+# Configuración básica
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+PORT = int(os.environ.get('PORT', 8080))
+
+# Validación
+if not TOKEN:
+    logging.error("❌ TELEGRAM_BOT_TOKEN no configurado")
+    sys.exit(1)
+
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuración
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL', '')
-PORT = int(os.environ.get('PORT', 8080))
-
-if not TOKEN:
-    logger.error("No se encontró TELEGRAM_BOT_TOKEN")
-    sys.exit(1)
-
 # Inicializar Flask y Bot
 app = Flask(__name__)
-bot = Bot(token=TOKEN)
+bot = telegram.Bot(token=TOKEN)
 
-# Inicializar Application (se configurará después)
-application = None
+# Almacén simple para evitar múltiples inicializaciones
+_initialized = False
 
-# --- COMANDOS DEL BOT ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await update.message.reply_text(
-        f"¡Hola {user.first_name}! 👋\n"
-        f"Bot funcionando correctamente en Render.\n"
-        f"Comandos: /start, /help, /info"
-    )
+async def initialize_bot():
+    """Inicializa el bot y configura webhook"""
+    global _initialized
+    if not _initialized and WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
+        await bot.set_webhook(url=webhook_url)
+        logger.info(f"✅ Webhook configurado: {webhook_url}")
+        _initialized = True
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Ayuda del Bot\n\n"
-        "Este bot está desplegado en Render 24/7.\n"
-        "Usa /info para ver el estado."
-    )
+async def handle_message(update):
+    """Procesa los mensajes entrantes"""
+    try:
+        message = update.get('message')
+        if not message:
+            return
+        
+        chat_id = message['chat']['id']
+        text = message.get('text', '')
+        
+        logger.info(f"Mensaje recibido: '{text}' de chat {chat_id}")
+        
+        if text == '/start':
+            await bot.send_message(
+                chat_id=chat_id,
+                text="🤖 ¡Hola! Bot funcionando correctamente en Render.\nComandos: /start, /help, /info"
+            )
+        elif text == '/help':
+            await bot.send_message(
+                chat_id=chat_id,
+                text="📚 Ayuda:\n• /start - Iniciar\n• /help - Esta ayuda\n• /info - Información"
+            )
+        elif text == '/info':
+            await bot.send_message(
+                chat_id=chat_id,
+                text="ℹ️ Bot desplegado en Render 24/7\nModo: Webhook"
+            )
+        elif text:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✉️ Eco: {text}"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error en handle_message: {e}", exc_info=True)
 
-async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"📊 Información:\n"
-        f"• Estado: 🟢 Activo en Render\n"
-        f"• Modo: Webhook\n"
-        f"• Versión: 1.0"
-    )
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "Bot de Telegram activo",
+        "webhook": "configurado" if WEBHOOK_URL else "no configurado"
+    })
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Recibí: {update.message.text}")
-
-# --- CONFIGURACIÓN DE LA APLICACIÓN ---
-def setup_application():
-    global application
-    application = Application.builder().token(TOKEN).build()
-    
-    # Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("info", info))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-    
-    return application
-
-# --- RUTAS DE FLASK ---
-@app.route('/')
-def index():
-    return """
-    <html>
-        <head><title>Bot de Telegram</title></head>
-        <body>
-            <h1>🤖 Bot de Telegram Activo en Render</h1>
-            <p>El bot está funcionando correctamente.</p>
-            <p>Webhook configurado: {}<p>
-        </body>
-    </html>
-    """.format("Sí" if WEBHOOK_URL else "No")
-
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
-    return 'OK', 200
+    return "OK", 200
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
     """Endpoint principal para Telegram"""
-    if request.method == 'POST':
-        try:
-            update = Update.de_json(request.get_json(force=True), bot)
-            # Procesar update de manera asíncrona
-            asyncio.run_coroutine_threadsafe(
-                application.process_update(update), 
-                application.loop
-            )
-            return 'OK', 200
-        except Exception as e:
-            logger.error(f"Error procesando update: {e}")
-            return 'Error', 500
-    return 'Method not allowed', 405
+    try:
+        # Log de la petición recibida
+        logger.info("📩 Webhook recibido")
+        
+        # Obtener y validar datos
+        data = request.get_json(force=True)
+        if not data:
+            logger.warning("⚠️ Datos vacíos en webhook")
+            return "No data", 400
+            
+        logger.info(f"Update ID: {data.get('update_id')}")
+        
+        # Procesar el mensaje de manera asíncrona
+        asyncio.create_task(handle_message(data))
+        
+        # Responder inmediatamente a Telegram
+        return "OK", 200
+        
+    except Exception as e:
+        logger.error(f"❌ Error en webhook: {e}", exc_info=True)
+        return "Error", 500
 
-# --- FUNCIÓN PRINCIPAL ---
-def main():
-    """Punto de entrada"""
-    global application
-    
-    # Configurar aplicación
-    application = setup_application()
-    
-    # Inicializar aplicación (crea el loop)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.start())
-    
-    # Configurar webhook si tenemos WEBHOOK_URL
-    if WEBHOOK_URL:
-        webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-        loop.run_until_complete(bot.set_webhook(url=webhook_url))
-        logger.info(f"✅ Webhook configurado en: {webhook_url}")
-    else:
-        logger.warning("⚠️ WEBHOOK_URL no configurada, el bot no recibirá mensajes")
-    
-    # Ejecutar Flask
-    app.run(host='0.0.0.0', port=PORT)
+@app.errorhandler(Exception)
+def handle_error(e):
+    logger.error(f"Error no manejado: {e}", exc_info=True)
+    return "Internal Server Error", 500
 
 if __name__ == '__main__':
-    main()
+    # Inicializar webhook al arrancar
+    asyncio.run(initialize_bot())
+    logger.info(f"🚀 Bot iniciado en puerto {PORT}")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
