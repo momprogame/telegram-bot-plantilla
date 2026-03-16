@@ -30,6 +30,21 @@ bot = telegram.Bot(token=TOKEN)
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
+# Función para ejecutar tareas asíncronas de forma segura
+def run_async(coro):
+    """Ejecuta una corrutina en el event loop global"""
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        # Esperar un poco para capturar errores inmediatos
+        return future.result(timeout=5)
+    except asyncio.TimeoutError:
+        # La tarea sigue ejecutándose, eso está bien
+        logger.debug("Tarea asíncrona continúa en segundo plano")
+        return None
+    except Exception as e:
+        logger.error(f"Error en tarea asíncrona: {e}")
+        return None
+
 @app.route('/', methods=['GET'])
 def home():
     return """
@@ -56,16 +71,67 @@ def webhook():
             logger.warning("⚠️ Datos vacíos")
             return "No data", 400
             
-        logger.info(f"📩 Webhook recibido - Update ID: {data.get('update_id')}")
+        update_id = data.get('update_id', 'desconocido')
+        logger.info(f"📩 Webhook recibido - Update ID: {update_id}")
         
-        # Crear una tarea en el event loop
-        future = asyncio.run_coroutine_threadsafe(
-            handle_message(data), 
-            loop
-        )
-        
-        # Esperar un poco para asegurar que se procesa (no bloquea)
-        future.add_done_callback(lambda f: logger.info("✅ Mensaje procesado correctamente") if not f.exception() else logger.error(f"❌ Error: {f.exception()}"))
+        # PROCESAR DIRECTAMENTE AQUÍ (sin async)
+        # Esto evita problemas de event loop
+        try:
+            # Extraer información básica del mensaje
+            if 'message' in data and 'text' in data['message']:
+                chat_id = data['message']['chat']['id']
+                text = data['message']['text']
+                user = data['message']['from'].get('first_name', 'Usuario')
+                
+                logger.info(f"💬 Mensaje de {user} (chat {chat_id}): '{text}'")
+                
+                # Responder según el comando (usando requests directamente)
+                import requests
+                
+                if text == '/start':
+                    requests.post(
+                        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": f"🎉 ¡Hola {user}! Bot funcionando correctamente.\n\nComandos:\n/start - Iniciar\n/help - Ayuda\n/info - Información"
+                        }
+                    )
+                    logger.info(f"✅ Respondido /start a {user}")
+                    
+                elif text == '/help':
+                    requests.post(
+                        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": "📚 Ayuda:\n• /start - Iniciar\n• /help - Esta ayuda\n• /info - Información\n• Cualquier mensaje - Eco"
+                        }
+                    )
+                    logger.info(f"✅ Respondido /help a {user}")
+                    
+                elif text == '/info':
+                    requests.post(
+                        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": "ℹ️ Información:\n• Estado: Activo\n• Modo: Webhook\n• Plataforma: Render\n• Versión: 3.0"
+                        }
+                    )
+                    logger.info(f"✅ Respondido /info a {user}")
+                    
+                else:
+                    requests.post(
+                        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": f"✉️ Eco: {text}"
+                        }
+                    )
+                    logger.info(f"✅ Respondido eco a {user}")
+            else:
+                logger.warning("⚠️ Mensaje sin texto")
+                
+        except Exception as e:
+            logger.error(f"❌ Error procesando mensaje: {e}", exc_info=True)
         
         return "OK", 200
         
@@ -73,91 +139,27 @@ def webhook():
         logger.error(f"❌ Error en webhook: {e}", exc_info=True)
         return "Error", 500
 
-async def handle_message(data):
-    """Procesa los mensajes"""
-    try:
-        logger.info("🔍 Procesando mensaje...")
-        
-        # Convertir el update de Telegram
-        update = telegram.Update.de_json(data, bot)
-        
-        if update.message and update.message.text:
-            chat_id = update.message.chat.id
-            text = update.message.text
-            user = update.message.from_user.first_name
-            
-            logger.info(f"💬 Mensaje de {user} (chat {chat_id}): '{text}'")
-            
-            # Responder según el comando
-            if text == '/start':
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🎉 ¡Hola {user}! Bot funcionando correctamente.\n\nComandos:\n/start - Iniciar\n/help - Ayuda\n/info - Información"
-                )
-                logger.info(f"✅ Respondido /start a {user}")
-                
-            elif text == '/help':
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="📚 Ayuda:\n• /start - Iniciar\n• /help - Esta ayuda\n• /info - Información\n• Cualquier mensaje - Eco"
-                )
-                logger.info(f"✅ Respondido /help a {user}")
-                
-            elif text == '/info':
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="ℹ️ Información:\n• Estado: Activo\n• Modo: Webhook\n• Plataforma: Render\n• Versión: 2.0"
-                )
-                logger.info(f"✅ Respondido /info a {user}")
-                
-            else:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"✉️ Eco: {text}"
-                )
-                logger.info(f"✅ Respondido eco a {user}")
-        else:
-            logger.warning("⚠️ Mensaje sin texto o sin message")
-            
-    except Exception as e:
-        logger.error(f"❌ Error procesando mensaje: {e}", exc_info=True)
-        # Intentar notificar al usuario del error
-        try:
-            if update and update.message:
-                await bot.send_message(
-                    chat_id=update.message.chat.id,
-                    text="❌ Ocurrió un error procesando tu mensaje. Los administradores han sido notificados."
-                )
-        except:
-            pass
-
-# Iniciar el loop en segundo plano para procesar tareas
-def start_background_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-# Hilo para el event loop
-import threading
-thread = threading.Thread(target=start_background_loop, args=(loop,), daemon=True)
-thread.start()
+@app.errorhandler(Exception)
+def handle_error(e):
+    logger.error(f"Error no manejado: {e}", exc_info=True)
+    return "Error", 500
 
 if __name__ == '__main__':
-    # Configurar webhook al iniciar
+    # Configurar webhook al iniciar usando requests
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
         logger.info(f"🔧 Configurando webhook en {webhook_url}")
         
-        async def setup_webhook():
-            result = await bot.set_webhook(url=webhook_url)
-            if result:
-                logger.info("✅ Webhook configurado exitosamente")
-            else:
-                logger.error("❌ Error configurando webhook")
-            return result
+        import requests
+        response = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+            data={"url": webhook_url}
+        )
         
-        # Ejecutar en el loop
-        future = asyncio.run_coroutine_threadsafe(setup_webhook(), loop)
-        future.result(timeout=10)  # Esperar hasta 10 segundos
+        if response.status_code == 200 and response.json().get('ok'):
+            logger.info("✅ Webhook configurado exitosamente")
+        else:
+            logger.error(f"❌ Error configurando webhook: {response.text}")
     
     logger.info(f"🚀 Bot iniciado en puerto {PORT}")
     app.run(host='0.0.0.0', port=PORT)
