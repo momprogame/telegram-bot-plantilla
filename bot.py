@@ -23,7 +23,7 @@ UPTIMEROBOT_API_KEY = "u3358345-5c4ed5db967b687a061c90e0"
 UPTIMEROBOT_API_URL = "https://api.uptimerobot.com/v2"
 
 # Usuario autorizado (SOLO este usuario puede usar el bot)
-AUTORIZADO = "@nautaii"  # O también puedes usar el ID numérico
+AUTORIZADO = "@nautaii"  # Cambia por tu usuario
 
 # Validación
 if not TOKEN:
@@ -44,11 +44,13 @@ notificaciones_config = defaultdict(lambda: {
     "activo": False,
     "intervalo": 10,  # minutos
     "ultima_notificacion": None,
-    "webs_estado_anterior": {}
+    "webs_estado_anterior": {},
+    "chat_id": None
 })
 
-# Thread local para el loop de notificaciones
+# Variable para controlar threads
 notificaciones_thread_running = True
+chat_id_autorizado = None  # Se actualizará cuando el usuario interactúe
 
 # ============================================
 # FUNCIONES DE SEGURIDAD - SOLO USUARIO AUTORIZADO
@@ -63,15 +65,26 @@ def verificar_acceso(update):
     if 'message' in update:
         username = update['message']['from'].get('username', '')
         chat_id = update['message']['chat']['id']
+        first_name = update['message']['from'].get('first_name', 'Usuario')
     elif 'callback_query' in update:
         username = update['callback_query']['from'].get('username', '')
         chat_id = update['callback_query']['message']['chat']['id']
+        first_name = update['callback_query']['from'].get('first_name', 'Usuario')
     else:
         return False, None
     
     if not usuario_autorizado(f"@{username}"):
-        enviar_mensaje(chat_id, "⛔ <b>ACCESO DENEGADO</b>\n\nEste bot es privado y solo puede ser usado por @nautaii.")
+        enviar_mensaje(chat_id, 
+            f"⛔ <b>ACCESO DENEGADO</b>\n\n"
+            f"Hola {first_name}, este es un bot privado.\n"
+            f"Solo el usuario {AUTORIZADO} puede usarlo.\n\n"
+            f"Si crees que esto es un error, contacta al administrador.")
         return False, None
+    
+    # Actualizar chat_id autorizado para notificaciones
+    global chat_id_autorizado
+    chat_id_autorizado = chat_id
+    notificaciones_config[chat_id]["chat_id"] = chat_id
     
     return True, chat_id
 
@@ -91,7 +104,9 @@ def enviar_mensaje(chat_id, texto, keyboard=None, parse_mode="HTML"):
         payload["reply_markup"] = json.dumps(keyboard)
     
     try:
-        requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json=payload, timeout=5)
+        if response.status_code != 200:
+            logger.error(f"Error enviando mensaje: {response.text}")
     except Exception as e:
         logger.error(f"Error enviando mensaje: {e}")
 
@@ -134,7 +149,7 @@ def responder_callback(callback_id, texto="", mostrar_alerta=False):
         pass
 
 # ============================================
-# FUNCIONES DE UPTIMEROBOT
+# FUNCIONES DE UPTIMEROBOT (CORREGIDAS)
 # ============================================
 
 def uptimerobot_request(action, params=None):
@@ -231,68 +246,66 @@ def obtener_color_estado(status):
     return colores.get(status, "⚫")
 
 # ============================================
-# FUNCIONES DE NOTIFICACIONES AUTOMÁTICAS
+# FUNCIONES DE NOTIFICACIONES AUTOMÁTICAS (CORREGIDAS)
 # ============================================
 
 def verificar_cambios_estado():
     """Verifica si alguna web cambió de estado y envía notificación"""
     try:
+        logger.info("🔍 Verificando cambios de estado...")
         monitores = obtener_monitores()
         if not monitores:
+            logger.info("No hay monitores para verificar")
             return
         
-        # Obtener el chat_id del usuario autorizado (simplificado - asumimos que ya inició el bot)
-        # En un bot real, deberías almacenar el chat_id cuando el usuario interactúa
-        # Por ahora, usaremos un valor fijo o lo obtendremos de la configuración
-        chat_id = None
-        
-        # Buscar el chat_id en la configuración (si existe una notificación activa)
-        for user_id, config in notificaciones_config.items():
-            if config["activo"]:
-                chat_id = user_id
-                break
-        
-        if not chat_id:
-            return
-        
-        # Crear diccionario de estado actual
-        estado_actual = {}
-        for m in monitores:
-            estado_actual[m['id']] = {
-                "nombre": m['friendly_name'],
-                "estado": m['status'],
-                "url": m['url']
-            }
-        
-        # Comparar con estado anterior
-        estado_anterior = notificaciones_config[chat_id]["webs_estado_anterior"]
-        
-        cambios = []
-        for monitor_id, datos in estado_actual.items():
-            estado_previo = estado_anterior.get(monitor_id, {}).get("estado")
+        # Verificar para cada usuario con notificaciones activas
+        for chat_id, config in notificaciones_config.items():
+            if not config.get("activo") or not config.get("chat_id"):
+                continue
             
-            if estado_previo is not None and estado_previo != datos["estado"]:
-                # Hubo cambio de estado
-                estado_actual_texto = obtener_estado_texto(datos["estado"])
-                estado_previo_texto = obtener_estado_texto(estado_previo)
+            logger.info(f"Verificando cambios para chat {chat_id}")
+            
+            # Crear diccionario de estado actual
+            estado_actual = {}
+            for m in monitores:
+                estado_actual[str(m['id'])] = {
+                    "nombre": m['friendly_name'],
+                    "estado": m['status'],
+                    "url": m['url']
+                }
+            
+            # Comparar con estado anterior
+            estado_anterior = config.get("webs_estado_anterior", {})
+            
+            cambios = []
+            for monitor_id, datos in estado_actual.items():
+                estado_previo = estado_anterior.get(monitor_id, {}).get("estado")
                 
-                cambios.append(f"""🔔 <b>¡CAMBIO DE ESTADO!</b>
+                if estado_previo is not None and estado_previo != datos["estado"]:
+                    # Hubo cambio de estado
+                    estado_actual_texto = obtener_estado_texto(datos["estado"])
+                    estado_previo_texto = obtener_estado_texto(estado_previo)
+                    
+                    mensaje = f"""🔔 <b>¡CAMBIO DE ESTADO!</b>
 
 <b>Web:</b> {datos['nombre']}
 <b>URL:</b> {datos['url']}
 <b>Cambió de:</b> {estado_previo_texto}
 <b>a:</b> {estado_actual_texto}
-<b>Hora:</b> {datetime.datetime.now().strftime('%d/%m %H:%M:%S')}
-""")
-        
-        # Enviar notificaciones si hay cambios
-        if cambios:
-            for cambio in cambios:
-                enviar_mensaje(chat_id, cambio)
-        
-        # Actualizar estado anterior
-        notificaciones_config[chat_id]["webs_estado_anterior"] = estado_actual
-        
+<b>Hora:</b> {datetime.datetime.now().strftime('%d/%m %H:%M:%S')}"""
+                    
+                    cambios.append(mensaje)
+                    logger.info(f"Cambio detectado en {datos['nombre']}: {estado_previo} -> {datos['estado']}")
+            
+            # Enviar notificaciones si hay cambios
+            if cambios:
+                for cambio in cambios:
+                    enviar_mensaje(chat_id, cambio)
+                    time.sleep(1)  # Pequeña pausa entre mensajes
+            
+            # Actualizar estado anterior
+            notificaciones_config[chat_id]["webs_estado_anterior"] = estado_actual
+            
     except Exception as e:
         logger.error(f"Error en verificar_cambios_estado: {e}")
 
@@ -300,17 +313,21 @@ def enviar_notificaciones_periodicas():
     """Función que se ejecuta en un thread para enviar notificaciones periódicas"""
     global notificaciones_thread_running
     
+    logger.info("🚀 Thread de notificaciones iniciado")
+    
     while notificaciones_thread_running:
         try:
             # Verificar cambios de estado para cada usuario con notificaciones activas
             for chat_id, config in notificaciones_config.items():
-                if config["activo"]:
+                if config.get("activo") and config.get("chat_id"):
                     # Verificar si ya pasó el intervalo
-                    ultima = config["ultima_notificacion"]
+                    ultima = config.get("ultima_notificacion")
                     ahora = datetime.datetime.now()
                     
                     if ultima is None or (ahora - ultima).total_seconds() >= config["intervalo"] * 60:
-                        # Enviar notificación de estado general
+                        logger.info(f"Enviando reporte periódico a chat {chat_id}")
+                        
+                        # Obtener monitores
                         monitores = obtener_monitores()
                         if monitores:
                             # Contar estados
@@ -334,8 +351,8 @@ def enviar_notificaciones_periodicas():
                             
                             # Verificar cambios específicos
                             verificar_cambios_estado()
-                        
-                        notificaciones_config[chat_id]["ultima_notificacion"] = ahora
+                            
+                            notificaciones_config[chat_id]["ultima_notificacion"] = ahora
             
             # Esperar 30 segundos antes de la próxima verificación
             time.sleep(30)
@@ -348,18 +365,20 @@ def autoping():
     """Función que envía un ping al usuario cada 20 minutos"""
     global notificaciones_thread_running
     
+    logger.info("🚀 Thread de autoping iniciado")
+    
     while notificaciones_thread_running:
         try:
-            # Buscar el chat_id del usuario autorizado
-            chat_id = None
-            for user_id in notificaciones_config.keys():
-                chat_id = user_id
-                break
-            
-            if chat_id:
+            if chat_id_autorizado:
                 ahora = datetime.datetime.now()
-                mensaje = f"🔄 <b>AUTOPING</b>\n\nEl bot sigue activo.\nHora: {ahora.strftime('%d/%m %H:%M:%S')}"
-                enviar_mensaje(chat_id, mensaje)
+                mensaje = f"""🔄 <b>AUTOPING</b>
+
+El bot sigue activo y monitoreando tus webs.
+<b>Hora:</b> {ahora.strftime('%d/%m %H:%M:%S')}
+<b>Notificaciones:</b> {'Activadas' if notificaciones_config.get(chat_id_autorizado, {}).get('activo') else 'Desactivadas'}"""
+                
+                enviar_mensaje(chat_id_autorizado, mensaje)
+                logger.info(f"Autoping enviado a {chat_id_autorizado}")
             
             # Esperar 20 minutos
             time.sleep(1200)  # 20 minutos en segundos
@@ -405,8 +424,8 @@ def teclado_cancelar():
 
 def teclado_notificaciones(chat_id):
     """Teclado para configuración de notificaciones"""
-    config = notificaciones_config[chat_id]
-    estado = "✅ ACTIVADAS" if config["activo"] else "❌ DESACTIVADAS"
+    config = notificaciones_config.get(chat_id, {"activo": False, "intervalo": 10})
+    estado = "✅ ACTIVADAS" if config.get("activo") else "❌ DESACTIVADAS"
     
     return {
         "inline_keyboard": [
@@ -498,6 +517,8 @@ def formatear_info_sistema(info):
     ram_color = '🟢' if info['ram_percent'] < 70 else '🟡' if info['ram_percent'] < 90 else '🔴'
     disk_color = '🟢' if info['disk_percent'] < 70 else '🟡' if info['disk_percent'] < 90 else '🔴'
     
+    notif_estado = "Activadas" if notificaciones_config.get(chat_id_autorizado, {}).get('activo') else "Desactivadas"
+    
     return f"""🖥️ <b>SISTEMA (RENDER)</b>
 
 ⏱️ <b>Uptime:</b> {info['uptime']}
@@ -510,14 +531,12 @@ def formatear_info_sistema(info):
 
 💾 <b>Disco:</b> {info['disk_used']}GB / {info['disk_total']}GB ({info['disk_percent']}%) {disk_color}
 
-🔔 <b>Notificaciones:</b> {'Activas' if notificaciones_config.get(chat_id_global, {}).get('activo') else 'Inactivas'}
+🔔 <b>Notificaciones:</b> {notif_estado}
 """
 
 # ============================================
 # PROCESAR COMANDOS Y CALLBACKS
 # ============================================
-
-chat_id_global = None  # Para almacenar el chat_id del usuario autorizado
 
 @app.route('/', methods=['GET'])
 def home():
@@ -529,7 +548,7 @@ def health():
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    global chat_id_global
+    global chat_id_autorizado
     
     try:
         data = request.get_json()
@@ -538,16 +557,6 @@ def webhook():
         acceso, chat_id = verificar_acceso(data)
         if not acceso:
             return "OK", 200
-        
-        # Guardar chat_id para notificaciones
-        chat_id_global = chat_id
-        if chat_id not in notificaciones_config:
-            notificaciones_config[chat_id] = {
-                "activo": False,
-                "intervalo": 10,
-                "ultima_notificacion": None,
-                "webs_estado_anterior": {}
-            }
         
         # ========== CALLBACKS DE BOTONES ==========
         if 'callback_query' in data:
@@ -578,16 +587,27 @@ def webhook():
                 editar_mensaje(chat_id, message_id, 
                     "🔔 <b>CONFIGURACIÓN DE NOTIFICACIONES</b>\n\n"
                     "• Recibirás reportes periódicos del estado de tus webs\n"
-                    "• También notificaciones cuando una web cambie de estado",
+                    "• También notificaciones cuando una web cambie de estado\n"
+                    "• Usa los botones para ajustar el intervalo",
                     teclado_notificaciones(chat_id))
                 responder_callback(callback_id)
                 return "OK", 200
             
             if data_callback == "notif_toggle":
                 config = notificaciones_config[chat_id]
-                config["activo"] = not config["activo"]
+                config["activo"] = not config.get("activo", False)
                 if config["activo"]:
                     config["ultima_notificacion"] = datetime.datetime.now()
+                    # Obtener estado inicial
+                    monitores = obtener_monitores()
+                    estado_inicial = {}
+                    for m in monitores:
+                        estado_inicial[str(m['id'])] = {
+                            "nombre": m['friendly_name'],
+                            "estado": m['status'],
+                            "url": m['url']
+                        }
+                    config["webs_estado_anterior"] = estado_inicial
                     texto = "✅ Notificaciones activadas"
                 else:
                     texto = "❌ Notificaciones desactivadas"
@@ -604,11 +624,11 @@ def webhook():
             if data_callback in ["notif_+1", "notif_+5", "notif_-1"]:
                 config = notificaciones_config[chat_id]
                 if data_callback == "notif_+1":
-                    config["intervalo"] = min(config["intervalo"] + 1, 1440)
+                    config["intervalo"] = min(config.get("intervalo", 10) + 1, 1440)
                 elif data_callback == "notif_+5":
-                    config["intervalo"] = min(config["intervalo"] + 5, 1440)
+                    config["intervalo"] = min(config.get("intervalo", 10) + 5, 1440)
                 elif data_callback == "notif_-1":
-                    config["intervalo"] = max(config["intervalo"] - 1, 1)
+                    config["intervalo"] = max(config.get("intervalo", 10) - 1, 1)
                 
                 editar_mensaje(chat_id, message_id, 
                     f"✅ Intervalo actualizado a {config['intervalo']} minutos",
@@ -633,8 +653,9 @@ def webhook():
             
             if data_callback == "menu_verificar_ahora":
                 enviar_accion_escribiendo(chat_id)
+                responder_callback(callback_id, "🔍 Verificando cambios...", mostrar_alerta=False)
                 verificar_cambios_estado()
-                responder_callback(callback_id, "✅ Verificación completada", mostrar_alerta=True)
+                enviar_mensaje(chat_id, "✅ Verificación completada", teclado_principal())
                 return "OK", 200
             
             if data_callback == "menu_help":
@@ -656,7 +677,7 @@ def webhook():
 • Autoping cada 20 minutos para confirmar que el bot vive
 
 <b>🔒 SEGURIDAD:</b>
-• Bot privado - Solo @nautaii puede usarlo
+• Bot privado - Solo {AUTORIZADO} puede usarlo
 
 <b>📊 ESTADOS:</b>
 🟢 Activo   🔴 Caído   🟠 Inestable   ⚪ Pausado"""
@@ -757,8 +778,11 @@ def webhook():
                             user_states[chat_id] = f"confirmar_eliminar_{monitor_id}"
                             texto = f"❌ ¿Estás seguro de eliminar <b>{monitor['friendly_name']}</b>?"
                         else:
-                            user_states[chat_id] = f"confirmar_pausar_{monitor_id}"
-                            texto = f"⏸️ ¿Qué acción deseas para <b>{monitor['friendly_name']}</b>?"
+                            texto = f"⏸️ Acciones para <b>{monitor['friendly_name']}</b>"
+                            keyboard = teclado_acciones_monitor(monitor_id, monitor['friendly_name'])
+                            editar_mensaje(chat_id, message_id, texto, keyboard)
+                            responder_callback(callback_id)
+                            return "OK", 200
                         
                         keyboard = {
                             "inline_keyboard": [
@@ -783,14 +807,6 @@ def webhook():
                 
                 editar_mensaje(chat_id, message_id, texto, teclado_principal())
                 user_states.pop(chat_id, None)
-                responder_callback(callback_id)
-                return "OK", 200
-            
-            if data_callback.startswith('confirm_pausar_'):
-                monitor_id = data_callback.replace('confirm_pausar_', '')
-                # Aquí deberías mostrar opciones de pausar/reanudar
-                texto = "Función de pausar/reanudar - Usa los botones del menú principal"
-                editar_mensaje(chat_id, message_id, texto, teclado_principal())
                 responder_callback(callback_id)
                 return "OK", 200
             
@@ -877,15 +893,17 @@ if __name__ == '__main__':
     # Iniciar thread de notificaciones
     notificaciones_thread = threading.Thread(target=enviar_notificaciones_periodicas, daemon=True)
     notificaciones_thread.start()
+    logger.info("✅ Thread de notificaciones iniciado")
     
     # Iniciar thread de autoping
     autoping_thread = threading.Thread(target=autoping, daemon=True)
     autoping_thread.start()
+    logger.info("✅ Thread de autoping iniciado")
     
     # Configurar webhook
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/{TOKEN}"
-        logger.info(f"🔧 Configurando webhook...")
+        logger.info(f"🔧 Configurando webhook en {webhook_url}")
         
         r = requests.post(
             f"https://api.telegram.org/bot{TOKEN}/setWebhook",
@@ -895,7 +913,7 @@ if __name__ == '__main__':
         if r.status_code == 200 and r.json().get('ok'):
             logger.info("✅ Webhook configurado correctamente")
         else:
-            logger.error(f"❌ Error: {r.text}")
+            logger.error(f"❌ Error configurando webhook: {r.text}")
     
     logger.info(f"🚀 Bot UptimeRobot Privado iniciado en puerto {PORT}")
     logger.info(f"👤 Usuario autorizado: {AUTORIZADO}")
